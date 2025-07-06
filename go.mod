@@ -1,4 +1,4 @@
-module dropin-gen
+module spheric.cloud/dropin-gen
 
 go 1.24
 
