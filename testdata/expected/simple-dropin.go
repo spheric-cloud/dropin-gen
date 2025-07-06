@@ -1,12 +1,13 @@
-// SPDX-FileCopyrightText: 2024 Axel Christ and Spheric contributors
+// SPDX-FileCopyrightText: 2025 Axel Christ and Spheric contributors
 // SPDX-License-Identifier: Apache-2.0
 
 // Package dropin demonstrates the usage of the dropin-gen tool.
 package dropin
 
 import (
-	"dropin-gen/testdata/orig"
 	"fmt"
+
+	"spheric.cloud/dropin-gen/testdata/orig"
 )
 
 type MyAlias[V any] = orig.MyAlias[V]

@@ -1,4 +1,4 @@
-// SPDX-FileCopyrightText: 2024 Axel Christ and Spheric contributors
+// SPDX-FileCopyrightText: 2025 Axel Christ and Spheric contributors
 // SPDX-License-Identifier: Apache-2.0
 
 package main
