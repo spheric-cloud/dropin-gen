@@ -12,7 +12,7 @@
 You can install `dropin-gen` using `go install`:
 
 ```sh
-go install github.com/spheric-cloud/dropin-gen@latest
+go install spheric.cloud/dropin-gen@latest
 ```
 
 ## Usage
