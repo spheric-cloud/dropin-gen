@@ -21,3 +21,11 @@ func MyFunc[S fmt.Stringer](s S) string {
 }
 
 var MyVar = 1
+
+// VarargFunc is a function with variadic arguments.
+func VarargFunc(a int, bs ...int) int {
+	for _, b := range bs {
+		a += b
+	}
+	return a
+}

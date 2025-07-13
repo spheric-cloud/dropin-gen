@@ -372,13 +372,15 @@ func writeFuncDeleg(pkg *types.Package, obj *types.Func) (string, error) {
 	sb.WriteString(obj.Name())
 	sb.WriteString("(")
 	if sig.Params() != nil {
-		var next bool
-		for v := range sig.Params().Variables() {
-			if next {
+		for i := 0; i < sig.Params().Len(); i++ {
+			param := sig.Params().At(i)
+			if i != 0 {
 				sb.WriteString(", ")
 			}
-			next = true
-			sb.WriteString(v.Name())
+			sb.WriteString(param.Name())
+			if sig.Variadic() && i == sig.Params().Len()-1 {
+				sb.WriteString("...")
+			}
 		}
 	}
 	sb.WriteString(")")

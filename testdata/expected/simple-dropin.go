@@ -25,3 +25,8 @@ type Predicate[V any] = orig.Predicate[V]
 //
 // Matching should be case-insensitive.
 type StringPredicate = orig.StringPredicate
+
+// VarargFunc is a function with variadic arguments.
+func VarargFunc(a int, bs ...int) int {
+	return orig.VarargFunc(a, bs...)
+}
