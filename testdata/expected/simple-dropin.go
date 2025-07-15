@@ -7,26 +7,26 @@ package dropin
 import (
 	"fmt"
 
-	"spheric.cloud/dropin-gen/testdata/orig"
+	orig1 "spheric.cloud/dropin-gen/testdata/orig"
 )
 
-type MyAlias[V any] = orig.MyAlias[V]
+type MyAlias[V any] = orig1.MyAlias[V]
 
 func MyFunc[S fmt.Stringer](s S) string {
-	return orig.MyFunc(s)
+	return orig1.MyFunc(s)
 }
 
-var MyVar int = orig.MyVar
+var MyVar int = orig1.MyVar
 
 // Predicate is a function that matches a value of any type.
-type Predicate[V any] = orig.Predicate[V]
+type Predicate[V any] = orig1.Predicate[V]
 
 // StringPredicate matches a given string.
 //
 // Matching should be case-insensitive.
-type StringPredicate = orig.StringPredicate
+type StringPredicate = orig1.StringPredicate
 
 // VarargFunc is a function with variadic arguments.
-func VarargFunc(a int, bs ...int) int {
-	return orig.VarargFunc(a, bs...)
+func VarargFunc(orig int, bs ...int) int {
+	return orig1.VarargFunc(orig, bs...)
 }

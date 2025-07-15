@@ -14,14 +14,58 @@ import (
 	"log/slog"
 	"maps"
 	"os"
+	"path"
 	"path/filepath"
 	"slices"
+	"strconv"
 	"strings"
 
 	"github.com/spf13/pflag"
 	"golang.org/x/tools/go/packages"
 	"golang.org/x/tools/imports"
 )
+
+type TypeParameterized interface {
+	TypeParams() *types.TypeParamList
+}
+
+func addTypeUsedNames(names map[string]struct{}, typ types.Type) {
+	if parameterized, ok := typ.(TypeParameterized); ok {
+		if typeParams := parameterized.TypeParams(); typeParams != nil {
+			for typeParam := range typeParams.TypeParams() {
+				names[typeParam.Obj().Name()] = struct{}{}
+
+				addTypeUsedNames(names, typeParam.Constraint())
+			}
+		}
+	}
+}
+
+func addExportUsedNames(names map[string]struct{}, obj types.Object) {
+	switch obj := obj.(type) {
+	case *types.TypeName:
+		addTypeUsedNames(names, obj.Type())
+	case *types.Func:
+		addTypeUsedNames(names, obj.Type())
+		sig := obj.Signature()
+
+		if params := sig.Params(); params != nil {
+			for v := range params.Variables() {
+				if name := v.Name(); name != "" {
+					names[name] = struct{}{}
+				}
+			}
+		}
+
+		if results := sig.Results(); results != nil {
+			for v := range results.Variables() {
+				if name := v.Name(); name != "" {
+					names[name] = struct{}{}
+				}
+			}
+		}
+	}
+}
 
 func loadPackage(srcDir, path string, filter func(filename string) bool) (*packages.Package, error) {
 	parseFile := func(fset *token.FileSet, filename string, src []byte) (*ast.File, error) {
@@ -114,11 +158,34 @@ func generate(
 	return nil
 }
 
+func buildPkgPathToAlias(pkg *packages.Package, usedNames map[string]struct{}) map[string]string {
+	pkgPathToAlias := make(map[string]string)
+	for _, imp := range pkg.Imports {
+		pkgPathToAlias[imp.PkgPath] = ""
+	}
+
+	if _, ok := usedNames[pkg.Name]; !ok {
+		pkgPathToAlias[pkg.PkgPath] = ""
+		return pkgPathToAlias
+	}
+
+	i := 1
+	for {
+		alias := fmt.Sprintf("%s%d", pkg.Name, i)
+		if _, ok := usedNames[alias]; !ok {
+			pkgPathToAlias[pkg.PkgPath] = alias
+			return pkgPathToAlias
+		}
+
+		i++
+	}
+}
+
 func buildDeleg(
 	outputPkg *packages.Package,
 	skipExportNames map[string]struct{},
 	importPkg *packages.Package,
-	importExports map[string]*Export,
+	importExports *Exports,
 	goHeaderFile string,
 ) ([]byte, error) {
 	var buf bytes.Buffer
@@ -153,22 +220,29 @@ func buildDeleg(
 	buf.WriteString(outputPkg.Name)
 	buf.WriteString("\n\n")
 
-	buf.WriteString("import (\n")
-	imports := maps.Clone(importPkg.Imports)
-	imports[importPkg.PkgPath] = importPkg
+	pkgPathToAlias := buildPkgPathToAlias(importPkg, importExports.UsedNames)
 
-	for p := range imports {
-		buf.WriteString(fmt.Sprintf("\t\"%s\"\n", p))
+	buf.WriteString("import (\n")
+
+	for pkgPath, alias := range pkgPathToAlias {
+		buf.WriteString("\t")
+		if alias != "" {
+			buf.WriteString(alias)
+			buf.WriteString(" ")
+		}
+		buf.WriteString(strconv.Quote(pkgPath))
+		buf.WriteString("\n")
 	}
 	buf.WriteString(")\n\n")
 
-	names := slices.Sorted(maps.Keys(importExports))
+	qf := adjustingQualifier(importPkg.Types, outputPkg.Types, pkgPathToAlias[importPkg.PkgPath])
+	names := slices.Sorted(maps.Keys(importExports.Exports))
 	for _, name := range names {
 		if _, ok := skipExportNames[name]; ok {
 			continue
 		}
 
-		importExport := importExports[name]
+		importExport := importExports.Exports[name]
 		if doc := importExport.Doc.Text(); doc != "" {
 			for line := range strings.Lines(doc) {
 				buf.WriteString("// ")
@@ -177,7 +251,7 @@ func buildDeleg(
 			}
 		}
 
-		deleg, err := writeDeleg(types.NewPackage("", outputPkg.Name), importExport.TypesObject)
+		deleg, err := writeDeleg(outputPkg.Types, importExport.TypesObject, qf)
 		if err != nil {
 			return nil, err
 		}
@@ -226,13 +300,26 @@ func topLevelExportedObjects(pkg *packages.Package) iter.Seq2[string, types.Obje
 	}
 }
 
-func analyzeExports(pkg *packages.Package) (map[string]*Export, error) {
+type Exports struct {
+	Exports   map[string]*Export
+	UsedNames map[string]struct{}
+}
+
+func analyzeExports(pkg *packages.Package) (*Exports, error) {
+	usedNames := make(map[string]struct{})
 	res := make(map[string]*Export)
 
 	// First step: Gather exports by looking at the type information.
 	for name, obj := range topLevelExportedObjects(pkg) {
+		addExportUsedNames(usedNames, obj)
 		res[name] = &Export{
 			TypesObject: obj,
+		}
+	}
+
+	for _, imp := range pkg.Imports {
+		if name := path.Base(imp.PkgPath); name != "" {
+			usedNames[name] = struct{}{}
 		}
 	}
 
@@ -272,10 +359,13 @@ func analyzeExports(pkg *packages.Package) (map[string]*Export, error) {
 		}
 	}
 
-	return res, nil
+	return &Exports{
+		Exports:   res,
+		UsedNames: usedNames,
+	}, nil
 }
 
-func writeTypeDeleg(pkg *types.Package, obj *types.TypeName) (string, error) {
+func writeTypeDeleg(pkg *types.Package, obj *types.TypeName, qf types.Qualifier) (string, error) {
 	var sb strings.Builder
 	var alias *types.Alias
 	if t, ok := obj.Type().(interface{ TypeParams() *types.TypeParamList }); ok && t.TypeParams().Len() > 0 {
@@ -300,30 +390,53 @@ func writeTypeDeleg(pkg *types.Package, obj *types.TypeName) (string, error) {
 	}
 	aliasType := types.NewTypeName(token.NoPos, nil, obj.Name(), alias)
 
-	sb.WriteString(types.ObjectString(aliasType, nameRelativeTo(pkg)))
+	sb.WriteString(types.ObjectString(aliasType, qf))
 	return sb.String(), nil
 }
 
-func writeDeleg(pkg *types.Package, obj types.Object) (string, error) {
+func writeDeleg(pkg *types.Package, obj types.Object, qf types.Qualifier) (string, error) {
 	switch obj := obj.(type) {
 	case *types.Func:
-		return writeFuncDeleg(pkg, obj)
+		return writeFuncDeleg(pkg, obj, qf)
 	case *types.Var:
-		return writeVarDeleg(pkg, obj)
+		return writeVarDeleg(pkg, obj, qf)
+	case *types.Const:
+		return writeConstDeleg(pkg, obj, qf)
 	case *types.TypeName:
-		return writeTypeDeleg(pkg, obj)
+		return writeTypeDeleg(pkg, obj, qf)
 	default:
 		return "", fmt.Errorf("unknown type %T", obj)
 	}
 }
 
-func writeVarDeleg(pkg *types.Package, obj *types.Var) (string, error) {
+func writeConstDeleg(pkg *types.Package, obj *types.Const, qf types.Qualifier) (string, error) {
 	var sb strings.Builder
-	sb.WriteString(types.ObjectString(obj, plainName))
+	sb.WriteString(types.ObjectString(obj, noQualifier))
 	sb.WriteString(" = ")
-	sb.WriteString(packagePrefix(obj.Pkg(), nameRelativeTo(pkg)))
+	sb.WriteString(packagePrefix(obj.Pkg(), qf))
 	sb.WriteString(obj.Name())
 	return sb.String(), nil
+}
+
+func writeVarDeleg(pkg *types.Package, obj *types.Var, qf types.Qualifier) (string, error) {
+	var sb strings.Builder
+	sb.WriteString(types.ObjectString(obj, noQualifier))
+	sb.WriteString(" = ")
+	sb.WriteString(packagePrefix(obj.Pkg(), qf))
+	sb.WriteString(obj.Name())
+	return sb.String(), nil
+}
+
+func adjustingQualifier(importPkg, outputPkg *types.Package, importPkgAlias string) types.Qualifier {
+	return func(other *types.Package) string {
+		if outputPkg != nil && outputPkg == other {
+			return "" // same package; unqualified
+		}
+		if importPkgAlias == "" || other != importPkg {
+			return other.Name()
+		}
+		return importPkgAlias
+	}
 }
 
 func packagePrefix(pkg *types.Package, qf types.Qualifier) string {
@@ -334,7 +447,7 @@ func packagePrefix(pkg *types.Package, qf types.Qualifier) string {
 	if qf != nil {
 		s = qf(pkg)
 	} else {
-		s = pkg.Path()
+		s = path.Base(pkg.Path())
 	}
 	if s != "" {
 		s += "."
@@ -342,25 +455,16 @@ func packagePrefix(pkg *types.Package, qf types.Qualifier) string {
 	return s
 }
 
-func nameRelativeTo(pkg *types.Package) types.Qualifier {
-	return func(other *types.Package) string {
-		if pkg != nil && pkg == other {
-			return "" // same package; unqualified
-		}
-		return other.Name()
-	}
-}
-
-func plainName(*types.Package) string {
+func noQualifier(*types.Package) string {
 	return ""
 }
 
-func writeFuncDeleg(pkg *types.Package, obj *types.Func) (string, error) {
+func writeFuncDeleg(pkg *types.Package, obj *types.Func, qf types.Qualifier) (string, error) {
 	var sb strings.Builder
 
 	delegFunc := types.NewFunc(token.NoPos, pkg, obj.Name(), obj.Signature())
 
-	sb.WriteString(types.ObjectString(delegFunc, nameRelativeTo(pkg)))
+	sb.WriteString(types.ObjectString(delegFunc, qf))
 	sb.WriteString(" {\n\t")
 
 	sig := obj.Signature()
@@ -368,7 +472,7 @@ func writeFuncDeleg(pkg *types.Package, obj *types.Func) (string, error) {
 		sb.WriteString("return ")
 	}
 
-	sb.WriteString(packagePrefix(obj.Pkg(), nameRelativeTo(pkg)))
+	sb.WriteString(packagePrefix(obj.Pkg(), qf))
 	sb.WriteString(obj.Name())
 	sb.WriteString("(")
 	if sig.Params() != nil {
